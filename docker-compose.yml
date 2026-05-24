@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./
+      dockerfile: ./docker/backend/Dockerfile
+      target: development  # Use development stage
+    ports:
+      - "8000:80"
+    volumes:
+      - ./src/backend:/var/www/html:rw
+      - ./docker/backend/dev.ini:/usr/local/etc/php/conf.d/dev.ini:ro
+    container_name: backend
+    depends_on:
+      - db
+    env_file:
+      - ./src/backend/.env
+    environment:
+      APP_ENV: "development"
+    restart: unless-stopped
+
+  db:
+    image: mariadb:11.4
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: ${BACKEND_DATABASE}
+      MYSQL_USER: ${BACKEND_USERNAME}
+      MYSQL_PASSWORD: ${BACKEND_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${BACKEND_ROOT_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ./data/backend-data:/var/lib/mysql
+    container_name: backend-db
+    restart: unless-stopped
+
+  websocket:
+    build:
+      context: ./
+      dockerfile: ./docker/websocket/Dockerfile
+      target: development  # Use development stage with nodemon
+    ports:
+      - "3003:3003"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./src/websocket:/usr/src/app:rw
+      - /usr/src/app/node_modules
+    container_name: websocket
+    environment:
+      NODE_ENV: development
+    restart: unless-stopped
+
+  auth-service:
+    build:
+      context: ./
+      dockerfile: ./docker/auth-service/Dockerfile
+      target: development  # Use development stage with nodemon
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./src/auth-service:/usr/src/app:rw
+      - /usr/src/app/node_modules
+    env_file:
+      - ./src/auth-service/.env
+    container_name: auth-service
+    depends_on:
+      - auth-db
+    restart: unless-stopped
+
+  auth-db:
+    image: mariadb:11.4
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./data/auth-data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${AUTH_PASSWORD}
+      MYSQL_DATABASE: ${AUTH_DATABASE}
+      TZ: Asia/Ho_Chi_Minh
+    container_name: auth-db
+    restart: unless-stopped
+
+  # portfolio-analyzer:
+  #   build:
+  #     context: ./
+  #     dockerfile: ./docker/portfolio-analyzer/Dockerfile
+  #     target: development
+  #   ports:
+  #     - "7070:7070"
+  #   dns:
+  #     - 8.8.8.8
+  #     - 1.1.1.1
+  #   volumes:
+  #     - ./src/portfolio-analyzer:/usr/src/app:rw
+  #   container_name: portfolio-analyzer
+  #   env_file:
+  #     - ./src/portfolio-analyzer/.env
+  #   restart: unless-stopped
+
+  # redis-cache:
+  #   image: redis:7-alpine
+  #   container_name: redis-cache
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - ./data/cache-data:/data
+  #   restart: unless-stopped
+
+volumes:
+  db-data:
+  auth-db-data:
+  # redis-data:

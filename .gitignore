@@ -1,0 +1,16 @@
+# Environment files
+.env
+
+# Database & cache volumes (Docker bind mounts — never commit)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+.claude/
+CLAUDE.md
