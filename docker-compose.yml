@@ -49,6 +49,8 @@ services:
       - ./src/websocket:/usr/src/app:rw
       - /usr/src/app/node_modules
     container_name: websocket
+    env_file:
+      - ./src/websocket/.env
     environment:
       NODE_ENV: development
     restart: unless-stopped
