@@ -85,22 +85,22 @@ services:
     container_name: auth-db
     restart: unless-stopped
 
-  # portfolio-analyzer:
-  #   build:
-  #     context: ./
-  #     dockerfile: ./docker/portfolio-analyzer/Dockerfile
-  #     target: development
-  #   ports:
-  #     - "7070:7070"
-  #   dns:
-  #     - 8.8.8.8
-  #     - 1.1.1.1
-  #   volumes:
-  #     - ./src/portfolio-analyzer:/usr/src/app:rw
-  #   container_name: portfolio-analyzer
-  #   env_file:
-  #     - ./src/portfolio-analyzer/.env
-  #   restart: unless-stopped
+  portfolio-analyzer:
+    build:
+      context: ./
+      dockerfile: ./docker/portfolio-analyzer/Dockerfile
+      target: development
+    ports:
+      - "7070:7070"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./src/portfolio-analyzer:/usr/src/app:rw
+    container_name: portfolio-analyzer
+    env_file:
+      - ./src/portfolio-analyzer/.env
+    restart: unless-stopped
 
   # redis-cache:
   #   image: redis:7-alpine
