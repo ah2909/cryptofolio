@@ -4,12 +4,13 @@ Microservices-based cryptocurrency portfolio and trading platform.
 
 ## Services
 
-| Service | Stack | Port |
-|---|---|---|
-| `backend` | Laravel 11 / PHP 8.2 | 8000 |
-| `auth-service` | Node.js / Express | 8086 |
-| `websocket` | Node.js / Socket.IO | 3003 |
-| `portfolio-analyzer` | Python / FastAPI + LangGraph | 7070 |
+| Service                | Stack                        | Port |
+| ---------------------- | ---------------------------- | ---- |
+| `backend`              | Laravel 11 / PHP 8.2         | 8000 |
+| `auth-service`         | Node.js / Express            | 8086 |
+| `websocket`            | Node.js / Socket.IO          | 3003 |
+| `portfolio-analyzer`   | Python / FastAPI + LangGraph | 7070 |
+| `crypto-alert-service` | Go / Gin                     | 4000 |
 
 **Infrastructure:** MariaDB 11.4 (backend: 3306, auth: 3307), Redis 7 (6379)
 
@@ -69,16 +70,19 @@ cp src/portfolio-analyzer/.env.example src/portfolio-analyzer/.env
 
 Key variables to fill in per service:
 
-**`src/backend/.env`**
+`src/backend/.env`
+
 - `COINGECKO_API_KEY` — get from [coingecko.com](https://www.coingecko.com/en/api)
 - `AUTH_SERVICE_URL` — set to `http://auth-service:8086`
 - `FRONTEND_URL` — your frontend origin for CORS (e.g. `http://localhost:5173`)
 
-**`src/auth-service/.env`**
+`src/auth-service/.env`
+
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — from [Google Cloud Console](https://console.cloud.google.com/)
 - `FRONTEND_URL` — same as backend
 
-**`src/portfolio-analyzer/.env`**
+`src/portfolio-analyzer/.env`
+
 - `GEMINI_API_KEY` — from [Google AI Studio](https://aistudio.google.com/)
 
 ### 4. Generate RSA key pair for JWT (auth-service)
