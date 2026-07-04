@@ -15,4 +15,8 @@ Thumbs.db
 .claude/
 CLAUDE.md
 
+.codex/
+.agents/
+AGENTS.md
+
 bruno/
