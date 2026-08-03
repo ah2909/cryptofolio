@@ -13,14 +13,15 @@ services:
       - ./docker/backend/dev.ini:/usr/local/etc/php/conf.d/dev.ini:ro
     container_name: backend
     depends_on:
-      - db
+      backend-db:
+        condition: service_healthy
     env_file:
       - ./src/backend/.env
     environment:
       APP_ENV: "development"
     restart: unless-stopped
 
-  db:
+  backend-db:
     image: mariadb:11.4
     ports:
       - "3306:3306"
@@ -32,7 +33,13 @@ services:
       TZ: Asia/Ho_Chi_Minh
     volumes:
       - ./data/backend-data:/var/lib/mysql
+      - ./docker/backend-db:/docker-entrypoint-initdb.d
     container_name: backend-db
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   websocket:
@@ -69,7 +76,8 @@ services:
       - ./src/auth-service/.env
     container_name: auth-service
     depends_on:
-      - auth-db
+      auth-db:
+        condition: service_healthy
     restart: unless-stopped
 
   auth-db:
@@ -78,11 +86,19 @@ services:
       - "3307:3306"
     volumes:
       - ./data/auth-data:/var/lib/mysql
+      - ./src/auth-service/db.sql:/docker-entrypoint-initdb.d/01-auth.sql:ro
     environment:
-      MYSQL_ROOT_PASSWORD: ${AUTH_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${AUTH_ROOT_PASSWORD}
       MYSQL_DATABASE: ${AUTH_DATABASE}
+      MYSQL_USER: ${AUTH_USERNAME}
+      MYSQL_PASSWORD: ${AUTH_PASSWORD}
       TZ: Asia/Ho_Chi_Minh
     container_name: auth-db
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   portfolio-analyzer:
@@ -102,16 +118,16 @@ services:
       - ./src/portfolio-analyzer/.env
     restart: unless-stopped
 
-  # redis-cache:
-  #   image: redis:7-alpine
-  #   container_name: redis-cache
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - ./data/cache-data:/data
-  #   restart: unless-stopped
+  redis-cache:
+    image: redis/redis-stack-server:latest
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/cache-data:/data
+    restart: unless-stopped
 
 volumes:
   db-data:
   auth-db-data:
-  # redis-data:
+  redis-data:
