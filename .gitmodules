@@ -14,3 +14,6 @@
 	path = src/portfolio-analyzer
 	url = https://github.com/ah2909/FM-analyze.git
 	branch = main
+[submodule "src/crypto-alert-engine"]
+	path = src/crypto-alert-engine
+	url = https://github.com/ah2909/crypto-alert-service.git

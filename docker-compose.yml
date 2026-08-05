@@ -21,27 +21,6 @@ services:
       APP_ENV: "development"
     restart: unless-stopped
 
-  backend-db:
-    image: mariadb:11.4
-    ports:
-      - "3306:3306"
-    environment:
-      MYSQL_DATABASE: ${BACKEND_DATABASE}
-      MYSQL_USER: ${BACKEND_USERNAME}
-      MYSQL_PASSWORD: ${BACKEND_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${BACKEND_ROOT_PASSWORD}
-      TZ: Asia/Ho_Chi_Minh
-    volumes:
-      - ./data/backend-data:/var/lib/mysql
-      - ./docker/backend-db:/docker-entrypoint-initdb.d
-    container_name: backend-db
-    healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   websocket:
     build:
       context: ./
@@ -80,6 +59,65 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  portfolio-analyzer:
+    build:
+      context: ./
+      dockerfile: ./docker/portfolio-analyzer/Dockerfile
+      target: development
+    ports:
+      - "7070:7070"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./src/portfolio-analyzer:/usr/src/app:rw
+    container_name: portfolio-analyzer
+    env_file:
+      - ./src/portfolio-analyzer/.env
+    restart: unless-stopped
+
+  crypto-alert-engine:
+    build:
+      context: ./
+      dockerfile: ./docker/crypto-alert-engine/Dockerfile
+      target: development
+    ports:
+      - "4000:4000"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./src/crypto-alert-engine:/app:rw
+      - /app/tmp
+    container_name: crypto-alert-engine
+    depends_on:
+      backend-db:
+        condition: service_healthy
+    env_file:
+      - ./src/crypto-alert-engine/.env
+    restart: unless-stopped
+
+  backend-db:
+    image: mariadb:11.4
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: ${BACKEND_DATABASE}
+      MYSQL_USER: ${BACKEND_USERNAME}
+      MYSQL_PASSWORD: ${BACKEND_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${BACKEND_ROOT_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - ./data/backend-data:/var/lib/mysql
+      - ./docker/backend-db:/docker-entrypoint-initdb.d
+    container_name: backend-db
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   auth-db:
     image: mariadb:11.4
     ports:
@@ -99,23 +137,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
-
-  portfolio-analyzer:
-    build:
-      context: ./
-      dockerfile: ./docker/portfolio-analyzer/Dockerfile
-      target: development
-    ports:
-      - "7070:7070"
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
-    volumes:
-      - ./src/portfolio-analyzer:/usr/src/app:rw
-    container_name: portfolio-analyzer
-    env_file:
-      - ./src/portfolio-analyzer/.env
     restart: unless-stopped
 
   redis-cache:
