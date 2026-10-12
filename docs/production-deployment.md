@@ -92,6 +92,8 @@ The Go Dockerfile copies only src/crypto-alert-engine into /app and builds ./cmd
 
 ## Troubleshooting and rollback
 
+To inspect connectivity and saved Compose settings without building images or deploying, run the Production workflow manually with check_settings enabled. It makes only a read-only compose.one request and prints selected settings and command checks; environment values and credentials remain private. Leave check_settings disabled for deployment.
+
 | Failure | Check |
 | --- | --- |
 | Checkout/build/publish failure | Remote submodule commits/access, original Dockerfile build paths, dependency availability, disk space, package permissions. |

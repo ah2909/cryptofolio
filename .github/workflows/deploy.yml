@@ -11,6 +11,10 @@ on:
         type: choice
         default: all
         options: [all, backend, auth-service, websocket, portfolio-analyzer, crypto-alert-engine]
+      check_settings:
+        description: Check Dokploy settings without building or deploying
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -18,8 +22,47 @@ concurrency:
   cancel-in-progress: false
   queue: max
 jobs:
+  check-settings:
+    if: github.event_name == 'workflow_dispatch' && inputs.check_settings
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: dokploy
+    steps:
+      - name: Read Dokploy settings without deploying
+        shell: bash
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : "${DOKPLOY_URL:?}" "${DOKPLOY_COMPOSE_ID:?}" "${DOKPLOY_API_KEY:?}"
+          : "${CF_ACCESS_CLIENT_ID:?}" "${CF_ACCESS_CLIENT_SECRET:?}"
+          [[ "$DOKPLOY_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/?$ ]] || exit 1
+          temp=$(mktemp -d)
+          trap 'rm -rf "$temp"' EXIT
+          query=$(jq -rn --arg id "$DOKPLOY_COMPOSE_ID" '$id|@uri')
+          curl_status=0
+          code=$(curl --silent --connect-timeout 10 --max-time 30 \
+            --output "$temp/config.json" --write-out '%{http_code}' \
+            -H "x-api-key: $DOKPLOY_API_KEY" \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            -H 'Cache-Control: no-cache' \
+            "${DOKPLOY_URL%/}/api/compose.one?composeId=$query") || curl_status=$?
+          echo "Dokploy settings GET: HTTP ${code:-000}; curl exit $curl_status"
+          ((curl_status==0)) && [[ "$code" == 200 ]] || exit 1
+          jq '{
+            sourceType, composeType, autoDeploy, randomize,
+            isolatedDeployment, isolatedDeploymentsVolume,
+            commandHasWait: ((.command // "")|test("(^| )--wait( |$)")),
+            commandIsSafe: ((.command // "")|test("--(renew-anon-volumes|force-recreate)|\\b(down|rm|prune)\\b|[;&|`]" )|not)
+          }' "$temp/config.json"
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && !inputs.check_settings
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -209,13 +252,20 @@ jobs:
           ' release/release.json >/dev/null
           query=$(jq -rn --arg id "$DOKPLOY_COMPOSE_ID" '$id|@uri')
           api GET "compose.one?composeId=$query" "$temp/config.json"
-          jq -e '
-            .sourceType=="raw" and .composeType=="docker-compose" and
-            (.autoDeploy|not) and (.randomize|not) and
-            (.isolatedDeployment|not) and (.isolatedDeploymentsVolume|not) and
-            (.command|test("(^| )--wait( |$)")) and
-            (.command|test("--(renew-anon-volumes|force-recreate)|\\b(down|rm|prune)\\b|[;&|`]" )|not)
-          ' "$temp/config.json" >/dev/null || { echo 'Use the documented Raw Compose settings and safe --wait command.'; exit 1; }
+          failed_settings=$(jq -r '[
+            {setting:"Source must be Raw", ok:(.sourceType=="raw")},
+            {setting:"Deployment type must be Docker Compose", ok:(.composeType=="docker-compose")},
+            {setting:"Auto Deploy must be disabled", ok:(.autoDeploy|not)},
+            {setting:"Randomize must be disabled", ok:(.randomize|not)},
+            {setting:"Isolated Deployment must be disabled", ok:(.isolatedDeployment|not)},
+            {setting:"Isolated Volumes must be disabled", ok:(.isolatedDeploymentsVolume|not)},
+            {setting:"Custom command must include --wait", ok:((.command // "")|test("(^| )--wait( |$)"))},
+            {setting:"Custom command contains unsafe flags or shell operators", ok:((.command // "")|test("--(renew-anon-volumes|force-recreate)|\\b(down|rm|prune)\\b|[;&|`]" )|not)}
+          ] | .[] | select(.ok|not) | .setting' "$temp/config.json")
+          if [[ -n "$failed_settings" ]]; then
+            printf '%s\n' "$failed_settings"
+            exit 1
+          fi
           api GET "deployment.allByCompose?composeId=$query" "$temp/baseline.json"
           jq -e 'type=="array" and all(.[]; (.deploymentId|type)=="string" and .status!="running")' \
             "$temp/baseline.json" >/dev/null || { echo 'A deployment is running or the response is unsupported.'; exit 1; }
