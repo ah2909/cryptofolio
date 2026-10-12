@@ -8,7 +8,7 @@
 	branch = main
 [submodule "src/websocket"]
 	path = src/websocket
-	url = https://github.com/ah2909/websocket.git
+	url = https://github.com/ah2909/FM-websocket.git
 	branch = main
 [submodule "src/portfolio-analyzer"]
 	path = src/portfolio-analyzer

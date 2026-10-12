@@ -20,4 +20,10 @@ CLAUDE.md
 AGENTS.md
 
 bruno/
-docs/
+docs/*
+!docs/production-deployment.md
+
+__pycache__/
+release/
+*.pem
+*.key

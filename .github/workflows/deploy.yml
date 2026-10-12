@@ -1,0 +1,310 @@
+name: Production
+on:
+  push:
+    branches: [main]
+  repository_dispatch:
+    types: [service-push]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to rebuild and deploy
+        type: choice
+        default: all
+        options: [all, backend, auth-service, websocket, portfolio-analyzer, crypto-alert-engine]
+permissions:
+  contents: read
+concurrency:
+  group: portfolio-production
+  cancel-in-progress: false
+  queue: max
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      has_images: ${{ steps.select.outputs.has_images }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select services and source commits
+        id: select
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SERVICE: ${{ inputs.service }}
+        run: |
+          set -euo pipefail
+          services=(backend auth-service websocket portfolio-analyzer crypto-alert-engine)
+          selected=()
+          case "$EVENT_NAME" in
+            repository_dispatch)
+              service=$(jq -er '.client_payload.service' "$GITHUB_EVENT_PATH")
+              module_sha=$(jq -er '.client_payload.sha' "$GITHUB_EVENT_PATH")
+              source_repo=$(jq -er '.client_payload.repository' "$GITHUB_EVENT_PATH")
+              case "$service" in backend|auth-service|websocket|portfolio-analyzer|crypto-alert-engine) ;; *) exit 1 ;; esac
+              [[ "$module_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+              url=$(git config -f .gitmodules --get "submodule.src/$service.url")
+              expected_repo="${url#https://github.com/}"
+              expected_repo="${expected_repo%.git}"
+              [[ "$source_repo" == "$expected_repo" ]] || { echo 'Unexpected service repository.'; exit 1; }
+              selected=("$service")
+              ;;
+            workflow_dispatch)
+              case "$INPUT_SERVICE" in
+                all) selected=("${services[@]}") ;;
+                backend|auth-service|websocket|portfolio-analyzer|crypto-alert-engine) selected=("$INPUT_SERVICE") ;;
+                *) exit 1 ;;
+              esac
+              ;;
+            push)
+              before=$(jq -r '.before' "$GITHUB_EVENT_PATH")
+              if [[ "$before" == 0000000000000000000000000000000000000000 ]] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+                selected=("${services[@]}")
+              else
+                git diff --name-only "$before" "$GITHUB_SHA" > changed-paths.txt
+                if grep -Eq '^(\.dockerignore|\.gitmodules)$' changed-paths.txt; then
+                  selected=("${services[@]}")
+                else
+                  for service in "${services[@]}"; do
+                    if grep -Eq "^(src/$service(/|$)|docker/$service/)" changed-paths.txt; then
+                      selected+=("$service")
+                    fi
+                  done
+                fi
+              fi
+              ;;
+            *) exit 1 ;;
+          esac
+          mkdir -p release
+          printf '' > release/selected-services.txt
+          for service in "${selected[@]}"; do
+            branch=$(git config -f .gitmodules --get "submodule.src/$service.branch" || printf main)
+            [[ "$branch" == main ]] || { echo 'Only service main branches are configured for production.'; exit 1; }
+            git -C "src/$service" fetch --no-tags origin "refs/heads/$branch"
+            latest=$(git -C "src/$service" rev-parse FETCH_HEAD)
+            if [[ "$EVENT_NAME" == repository_dispatch && "$latest" != "$module_sha" ]]; then
+              echo 'Skipping a superseded service notification.'
+              continue
+            fi
+            git -C "src/$service" checkout --detach "$latest"
+            git -C "src/$service" submodule update --init --recursive
+            printf '%s\n' "$service" >> release/selected-services.txt
+          done
+          if [[ -s release/selected-services.txt ]]; then
+            echo 'has_images=true' >> "$GITHUB_OUTPUT"
+            echo 'Selected services:'
+            cat release/selected-services.txt
+          else
+            echo 'has_images=false' >> "$GITHUB_OUTPUT"
+            echo 'No application images need updating.'
+          fi
+      - name: Log in to GHCR
+        if: steps.select.outputs.has_images == 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - if: steps.select.outputs.has_images == 'true'
+        run: docker buildx create --use
+      - name: Build and publish images
+        if: steps.select.outputs.has_images == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          namespace="${GITHUB_REPOSITORY,,}"
+          mkdir -p release
+          jq -n --arg sha "$GITHUB_SHA" '{release:$sha,images:{},tags:{},moduleCommits:{}}' > release/release.json
+          while IFS= read -r service; do
+            image="ghcr.io/$namespace/$service"
+            module_sha=$(git -C "src/$service" rev-parse HEAD)
+            tag="$image:sha-$module_sha-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            if docker buildx imagetools inspect "$tag" >release/inspection.txt 2>&1; then
+              echo "Commit tag already exists for $service; rerun only deployment or use a new commit."
+              exit 1
+            fi
+            if ! grep -Eqi 'manifest unknown|not found|404' release/inspection.txt; then
+              echo 'Unable to confirm tag absence; publishing stopped.'
+              exit 1
+            fi
+            docker buildx build --platform linux/amd64 --target production \
+              --file "docker/$service/Dockerfile" \
+              --label "org.opencontainers.image.revision=$module_sha" \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --tag "$tag" --metadata-file "release/$service.json" --push .
+            digest=$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "release/$service.json")
+            jq --arg service "$service" --arg image "$image@$digest" --arg tag "$tag" --arg commit "$module_sha" \
+              '.images[$service]=$image | .tags[$service]=$tag | .moduleCommits[$service]=$commit' release/release.json > release/next.json
+            mv release/next.json release/release.json
+          done < release/selected-services.txt
+          cat release/release.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.select.outputs.has_images == 'true'
+        with:
+          name: production-release
+          path: release/release.json
+          if-no-files-found: error
+          retention-days: 90
+  deploy:
+    needs: publish
+    if: needs.publish.outputs.has_images == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: dokploy
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: production-release
+          path: release
+      - name: Deploy through Dokploy and check health
+        shell: bash
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+          APP_HEALTH_URL: ${{ vars.APP_HEALTH_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : "${DOKPLOY_URL:?}" "${DOKPLOY_COMPOSE_ID:?}" "${APP_HEALTH_URL:?}"
+          : "${DOKPLOY_API_KEY:?}" "${CF_ACCESS_CLIENT_ID:?}" "${CF_ACCESS_CLIENT_SECRET:?}"
+          [[ "$DOKPLOY_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/?$ ]] || exit 1
+          [[ "$APP_HEALTH_URL" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/[^?#]*$ ]] || exit 1
+          base="${DOKPLOY_URL%/}"
+          temp=$(mktemp -d)
+          trap 'rm -rf "$temp"' EXIT
+          api() {
+            local method="$1" endpoint="$2" output="$3"
+            local options=()
+            if [[ "$method" == GET ]]; then
+              options+=(--retry 2 --retry-delay 2 --retry-max-time 60)
+            else
+              options+=(--data-binary "@$4")
+            fi
+            local code
+            if ! code=$(curl --silent --connect-timeout 10 --max-time 30 \
+              --request "$method" --output "$output" --write-out '%{http_code}' \
+              -H "x-api-key: $DOKPLOY_API_KEY" \
+              -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+              -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+              -H 'Content-Type: application/json' -H 'Cache-Control: no-cache' \
+              "${options[@]}" "$base/api/$endpoint") || [[ "$code" != 200 ]]; then
+              echo "Dokploy $method request failed; inspect Dokploy before retrying a mutation."
+              return 1
+            fi
+            jq -e . "$output" >/dev/null 2>&1 || { echo 'Unexpected Dokploy response.'; return 1; }
+          }
+          jq -e --arg sha "$GITHUB_SHA" '
+            .release==$sha and
+            (.images|type)=="object" and (.images|length)>0 and
+            ((.images|keys)-["auth-service","backend","crypto-alert-engine","portfolio-analyzer","websocket"]|length)==0 and
+            (.images|all(.[];test("^ghcr\\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$")))
+          ' release/release.json >/dev/null
+          query=$(jq -rn --arg id "$DOKPLOY_COMPOSE_ID" '$id|@uri')
+          api GET "compose.one?composeId=$query" "$temp/config.json"
+          jq -e '
+            .sourceType=="raw" and .composeType=="docker-compose" and
+            (.autoDeploy|not) and (.randomize|not) and
+            (.isolatedDeployment|not) and (.isolatedDeploymentsVolume|not) and
+            (.command|test("(^| )--wait( |$)")) and
+            (.command|test("--(renew-anon-volumes|force-recreate)|\\b(down|rm|prune)\\b|[;&|`]" )|not)
+          ' "$temp/config.json" >/dev/null || { echo 'Use the documented Raw Compose settings and safe --wait command.'; exit 1; }
+          api GET "deployment.allByCompose?composeId=$query" "$temp/baseline.json"
+          jq -e 'type=="array" and all(.[]; (.deploymentId|type)=="string" and .status!="running")' \
+            "$temp/baseline.json" >/dev/null || { echo 'A deployment is running or the response is unsupported.'; exit 1; }
+          jq -r '.composeFile' "$temp/config.json" > "$temp/compose.yml"
+          jq -r '.images|to_entries[]|[.key,.value]|@tsv' release/release.json > "$temp/images.tsv"
+          awk -v manifest="$temp/images.tsv" '
+            BEGIN { while ((getline row < manifest)>0) {split(row, fields, "\t"); images[fields[1]]=fields[2]} }
+            /^services:$/ { in_services=1; print; next }
+            /^[^ ]/ { in_services=0 }
+            in_services && /^  [a-zA-Z0-9_-]+:$/ { service=$1; sub(/:$/, "", service) }
+            in_services && /^    image:/ && service in images {
+              if (service=="backend" && $0 !~ /^    image: &backend-image /) exit 1
+              print "    image: " (service=="backend" ? "&backend-image " : "") images[service]
+              count[service]++; next
+            }
+            { print }
+            END { for (service in images) if (count[service]!=1) exit 1 }
+          ' "$temp/compose.yml" > "$temp/next.yml" || { echo 'Use the supplied Compose image layout.'; exit 1; }
+          awk '
+            /^services:$/ { in_services=1; next }
+            /^[^ ]/ { in_services=0 }
+            in_services && /^  [a-zA-Z0-9_-]+:$/ { service=$1; sub(/:$/, "", service) }
+            in_services && /^    image:/ && service ~ /^(backend|auth-service|websocket|portfolio-analyzer|crypto-alert-engine)$/ {
+              image=$2; if (image=="&backend-image") image=$3
+              print service "\t" image
+            }
+          ' "$temp/next.yml" | jq -Rn '[inputs|split("\t")|{key:.[0],value:.[1]}]|from_entries' > "$temp/full-images.json"
+          jq -e '
+            (keys)==["auth-service","backend","crypto-alert-engine","portfolio-analyzer","websocket"] and
+            all(.[];test("^ghcr\\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$"))
+          ' "$temp/full-images.json" >/dev/null || { echo 'Run the first deployment with service=all to initialize every image.'; exit 1; }
+          jq -n --arg id "$DOKPLOY_COMPOSE_ID" --rawfile compose "$temp/next.yml" \
+            '{composeId:$id,composeFile:$compose}' > "$temp/update.json"
+          api POST compose.update "$temp/update-response.json" "$temp/update.json"
+          api GET "compose.one?composeId=$query" "$temp/saved.json"
+          jq -en --slurpfile before "$temp/config.json" --slurpfile after "$temp/saved.json" \
+            --rawfile compose "$temp/next.yml" \
+            '$before[0].env==$after[0].env and $after[0].composeFile==$compose' >/dev/null
+          title="gha-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${GITHUB_SHA:0:12}"
+          jq --arg title "$title" --slurpfile deployed "$temp/full-images.json" '.+{title:$title,healthy:false,deployedImages:$deployed[0]}' release/release.json > release/deployment-record.json
+          jq -n --arg id "$DOKPLOY_COMPOSE_ID" --arg title "$title" --arg sha "$GITHUB_SHA" \
+            '{composeId:$id,title:$title,description:$sha,freshVolumes:false}' > "$temp/trigger.json"
+          api POST compose.deploy "$temp/trigger-response.json" "$temp/trigger.json"
+          deadline=$((SECONDS+900))
+          deployment_id=''
+          status=''
+          while ((SECONDS<deadline)); do
+            api GET "deployment.allByCompose?composeId=$query" "$temp/deployments.json"
+            jq --arg title "$title" --slurpfile baseline "$temp/baseline.json" '
+              map(select(.title==$title and
+                (.deploymentId as $id | $baseline[0]|map(.deploymentId)|index($id)|not)))
+            ' "$temp/deployments.json" > "$temp/matches.json"
+            count=$(jq length "$temp/matches.json")
+            ((count<=1)) || { echo 'Multiple matching deployments; inspect Dokploy.'; exit 1; }
+            if ((count==1)); then
+              current_id=$(jq -er '.[0].deploymentId' "$temp/matches.json")
+              [[ -z "$deployment_id" || "$deployment_id" == "$current_id" ]] || exit 1
+              deployment_id="$current_id"
+              status=$(jq -er '.[0].status' "$temp/matches.json")
+              case "$status" in
+                done) break ;;
+                running) ;;
+                *) echo 'Dokploy deployment failed or returned an unsupported status.'; exit 1 ;;
+              esac
+            fi
+            sleep 5
+          done
+          [[ "$status" == done ]] || { echo 'Deployment timed out; inspect Dokploy before retrying.'; exit 1; }
+          api GET "compose.one?composeId=$query" "$temp/final.json"
+          jq -en --rawfile compose "$temp/next.yml" --slurpfile final "$temp/final.json" \
+            '$final[0].composeFile==$compose' >/dev/null
+          deadline=$((SECONDS+180))
+          healthy=false
+          while ((SECONDS<deadline)); do
+            code=$(curl --silent --connect-timeout 10 --max-time 15 --output /dev/null \
+              --write-out '%{http_code}' -H 'Cache-Control: no-cache' \
+              "$APP_HEALTH_URL?deployment=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" || true)
+            if [[ "$code" == 200 ]]; then healthy=true; break; fi
+            sleep 5
+          done
+          [[ "$healthy" == true ]] || { echo 'Public health verification failed.'; exit 1; }
+          jq --arg id "$deployment_id" '.+{deploymentId:$id,healthy:true}' \
+            release/deployment-record.json > "$temp/record.json"
+          mv "$temp/record.json" release/deployment-record.json
+          echo "Dokploy deployment completed and public health passed: $GITHUB_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: production-deployment-record
+          path: release/*record.json
+          if-no-files-found: ignore
+          retention-days: 90

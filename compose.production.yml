@@ -1,0 +1,203 @@
+x-health: &health
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 40s
+x-backend-env: &backend-env
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_KEY: ${APP_KEY:?}
+  APP_URL: ${BACKEND_URL:?}
+  APP_TIMEZONE: Asia/Ho_Chi_Minh
+  LOG_CHANNEL: stderr
+  DB_CONNECTION: mariadb
+  DB_HOST: backend-db
+  DB_PORT: "3306"
+  DB_DATABASE: ${BACKEND_DATABASE:?}
+  DB_USERNAME: ${BACKEND_USERNAME:?}
+  DB_PASSWORD: ${BACKEND_PASSWORD:?}
+  REDIS_SCHEME: tcp
+  REDIS_CLIENT: predis
+  REDIS_HOST: redis-cache
+  REDIS_PORT: "6379"
+  REDIS_USERNAME: default
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+  CACHE_STORE: redis
+  QUEUE_CONNECTION: redis
+  SESSION_DRIVER: database
+  FRONTEND_URL: ${FRONTEND_URL:?}
+  AUTH_SERVICE_URL: http://auth-service:8086
+  CEX_SERVICE_URL: http://websocket:3003
+  PORTFOLIO_ANALYZER_URL: http://portfolio-analyzer:7070
+  COINGECKO_URL: https://api.coingecko.com/api/v3
+  COINGECKO_API_KEY: ${COINGECKO_API_KEY:?}
+services:
+  backend:
+    image: &backend-image ${BACKEND_IMAGE:?}
+    restart: unless-stopped
+    environment: *backend-env
+    volumes:
+      - uploads:/var/www/html/storage/app
+    networks: [private, dokploy-network]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: [CMD, curl, --fail, --silent, http://localhost/up]
+    stop_grace_period: 140s
+  migrate:
+    image: *backend-image
+    restart: "no"
+    environment: *backend-env
+    command: [php, artisan, migrate, --force, --no-interaction]
+    networks: [private]
+    depends_on:
+      backend-db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+  auth-service:
+    image: ${AUTH_SERVICE_IMAGE:?}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "8086"
+      FRONTEND_URL: ${FRONTEND_URL:?}
+      BACKEND_URL: ${BACKEND_URL:?}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:?}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?}
+      MARIADB_HOST: auth-db
+      MARIADB_DATABASE: ${AUTH_DATABASE:?}
+      MARIADB_USER: ${AUTH_USERNAME:?}
+      MARIADB_PASSWORD: ${AUTH_PASSWORD:?}
+      REDIS_HOST: redis-cache
+      REDIS_PORT: "6379"
+      REDIS_USERNAME: default
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    volumes:
+      - ../files/id_rsa_priv.pem:/usr/src/app/id_rsa_priv.pem:ro
+      - ../files/id_rsa_pub.pem:/usr/src/app/id_rsa_pub.pem:ro
+    networks: [private, dokploy-network]
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: [CMD, node, -e, "fetch('http://localhost:8086/.well-known/jwks.json').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  websocket:
+    image: ${WEBSOCKET_IMAGE:?}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      AUTH_SERVICE_URL: http://auth-service:8086
+      REDIS_HOST: redis-cache
+      REDIS_PORT: "6379"
+      REDIS_USERNAME: default
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    networks: [private, dokploy-network]
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: [CMD, node, -e, "fetch('http://localhost:3003/socket.io/?EIO=4&transport=polling').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  portfolio-analyzer:
+    image: ${PORTFOLIO_ANALYZER_IMAGE:?}
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?}
+      GEMINI_MODEL: ${GEMINI_MODEL:?}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:?}
+      COINGECKO_PRO: ${COINGECKO_PRO:-false}
+      BACKEND_URL: http://backend
+      FRONTEND_URL: ${FRONTEND_URL:?}
+      REDIS_HOST: redis-cache
+      REDIS_PORT: "6379"
+      REDIS_USERNAME: default
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    networks: [private]
+    depends_on:
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:7070/openapi.json', timeout=4)"]
+  crypto-alert-engine:
+    image: ${CRYPTO_ALERT_ENGINE_IMAGE:?}
+    restart: unless-stopped
+    environment:
+      API_PORT: :4000
+      GIN_MODE: release
+      MYSQL_DSN: ${ALERT_MYSQL_DSN:?}
+      REDIS_ADDR: redis-cache:6379
+      REDIS_USERNAME: default
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+      AUTH_SERVICE_URL: http://auth-service:8086
+      CORS_ALLOWED_ORIGINS: ${FRONTEND_URL:?}
+    networks: [private, dokploy-network]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: [CMD, wget, -q, -O, /dev/null, http://localhost:4000/health]
+  backend-db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${BACKEND_DATABASE:?}
+      MARIADB_USER: ${BACKEND_USERNAME:?}
+      MARIADB_PASSWORD: ${BACKEND_PASSWORD:?}
+      MARIADB_ROOT_PASSWORD: ${BACKEND_ROOT_PASSWORD:?}
+    volumes:
+      - backend-db:/var/lib/mysql
+    networks: [private]
+    healthcheck:
+      <<: *health
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+  auth-db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${AUTH_DATABASE:?}
+      MARIADB_USER: ${AUTH_USERNAME:?}
+      MARIADB_PASSWORD: ${AUTH_PASSWORD:?}
+      MARIADB_ROOT_PASSWORD: ${AUTH_ROOT_PASSWORD:?}
+    volumes:
+      - auth-db:/var/lib/mysql
+    networks: [private]
+    healthcheck:
+      <<: *health
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+  redis-cache:
+    image: redis/redis-stack-server:7.4.0-v8
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+      REDIS_ARGS: --appendonly yes --requirepass ${REDIS_PASSWORD:?}
+    volumes:
+      - redis:/data
+    networks: [private]
+    healthcheck:
+      <<: *health
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+networks:
+  private:
+  dokploy-network:
+    external: true
+volumes:
+  backend-db:
+  auth-db:
+  redis:
+  uploads:

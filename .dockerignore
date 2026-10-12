@@ -36,3 +36,17 @@
 **/*.md
 LICENSE
 README.md
+
+**/.env.*
+**/*.pem
+**/*.key
+**/bootstrap/cache/*.php
+**/storage/logs/*
+**/storage/framework/*
+data/
+.agents/
+.codex/
+**/*.sqlite
+**/.pytest_cache
+**/htmlcov
+**/.coverage

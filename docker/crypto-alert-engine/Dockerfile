@@ -6,7 +6,7 @@ WORKDIR /app
 # Install git (often needed for go mod download)
 RUN apk add --no-cache git
 
-COPY /src/crypto-alert-engine/go.mod /src/crypto-alert-engine/go.sum ./
+COPY src/crypto-alert-engine/go.mod src/crypto-alert-engine/go.sum ./
 RUN go mod download
 
 
@@ -16,7 +16,7 @@ FROM base AS development
 # Install Air for hot reloading (latest official repository: air-verse/air)
 RUN go install github.com/air-verse/air@v1.67.4
 
-COPY . .
+COPY src/crypto-alert-engine/ ./
 
 EXPOSE 4000
 
@@ -27,10 +27,10 @@ CMD ["air"]
 # --- Stage 3: Build static Go binary ---
 FROM base AS builder
 
-COPY . .
+COPY src/crypto-alert-engine/ ./
 
 # Build statically linked binary optimized for production
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o crypto-alert-engine .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o crypto-alert-engine ./cmd
 
 
 # --- Stage 4: Production image ---
