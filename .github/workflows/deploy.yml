@@ -155,7 +155,7 @@ jobs:
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - if: steps.select.outputs.has_images == 'true'
         run: docker buildx create --use
-      - name: Build and publish images
+      - name: Build, audit, scan, and publish images
         if: steps.select.outputs.has_images == 'true'
         shell: bash
         run: |
@@ -175,12 +175,31 @@ jobs:
               echo 'Unable to confirm tag absence; publishing stopped.'
               exit 1
             fi
-            docker buildx build --platform linux/amd64 --target production \
+            docker buildx build --pull --platform linux/amd64 --target production \
               --file "docker/$service/Dockerfile" \
               --label "org.opencontainers.image.revision=$module_sha" \
               --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-              --tag "$tag" --metadata-file "release/$service.json" --push .
-            digest=$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "release/$service.json")
+              --tag "$tag" --load .
+            case "$service" in
+              backend)
+                docker build --pull --target vendor --file docker/backend/Dockerfile --tag "$tag-audit" .
+                docker run --rm --entrypoint composer "$tag-audit" audit --locked --no-dev --format=json > release/backend-composer-audit.json
+                ;;
+              auth-service|websocket)
+                docker run --rm --entrypoint npm "$tag" audit --omit=dev --audit-level=high --json > "release/$service-npm-audit.json"
+                ;;
+            esac
+            archive="release/$service-image.tar"
+            trap 'rm -f "$archive"' EXIT
+            docker save --output "$archive" "$tag"
+            docker run --rm -v "$PWD/release:/scan:ro" -v cryptofolio-trivy-cache:/root/.cache/ \
+              aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c \
+              image --input "/scan/$service-image.tar" --scanners vuln --severity HIGH,CRITICAL \
+              --exit-code 1 --format json > "release/$service-trivy.json"
+            rm "$archive"
+            trap - EXIT
+            docker push "$tag"
+            digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))')
             jq --arg service "$service" --arg image "$image@$digest" --arg tag "$tag" --arg commit "$module_sha" \
               '.images[$service]=$image | .tags[$service]=$tag | .moduleCommits[$service]=$commit' release/release.json > release/next.json
             mv release/next.json release/release.json
@@ -193,6 +212,16 @@ jobs:
           path: release/release.json
           if-no-files-found: error
           retention-days: 90
+      - name: Retain dependency audit and image scan reports
+        if: always() && steps.select.outputs.has_images == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: security-reports
+          path: |
+            release/*-audit.json
+            release/*-trivy.json
+          if-no-files-found: warn
+          retention-days: 30
   deploy:
     needs: publish
     if: needs.publish.outputs.has_images == 'true'
@@ -326,14 +355,14 @@ jobs:
               deployment_id="$current_id"
               status=$(jq -er '.[0].status' "$temp/matches.json")
               case "$status" in
-                done) break ;;
+                'done') break ;;
                 running) ;;
                 *) echo 'Dokploy deployment failed or returned an unsupported status.'; exit 1 ;;
               esac
             fi
             sleep 5
           done
-          [[ "$status" == done ]] || { echo 'Deployment timed out; inspect Dokploy before retrying.'; exit 1; }
+          [[ "$status" == "done" ]] || { echo 'Deployment timed out; inspect Dokploy before retrying.'; exit 1; }
           api GET "compose.one?composeId=$query" "$temp/final.json"
           jq -en --rawfile compose "$temp/next.yml" --slurpfile final "$temp/final.json" \
             '$final[0].composeFile==$compose' >/dev/null

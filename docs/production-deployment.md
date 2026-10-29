@@ -2,7 +2,19 @@
 
 The workflow is `push to main → build/publish GHCR images → deploy through Dokploy → check public health`.
 
-There is no CI job and no Python helper. Bash, curl, jq and Docker commands run directly in `.github/workflows/deploy.yml` on GitHub-hosted runners. Dockerfiles retain their original contents except for corrected source-copy paths and the Go entry-point build in docker/crypto-alert-engine/Dockerfile. The missing `docker/backend/supervisord.conf` support file is provided because the original backend Dockerfile references it.
+Build, dependency-audit, and image-scan commands run directly in `.github/workflows/deploy.yml` on GitHub-hosted runners. Each candidate is loaded locally, audited and scanned, then pushed without rebuilding. A failed audit or scan prevents publication of that candidate and prevents the deploy job from running. JSON audit/scan reports are retained even on failure. Custom smoke tests are not part of deployment.
+
+## Runtime security upgrades
+
+The backend uses digest-pinned PHP 8.2.35 on Debian 13, with a build-time minimum for Debian's patched Brotli library and upload progress disabled before request parsing. Composer dependencies use the same PHP/extensions as runtime. The backend dependency lock now uses Laravel 12.70.2; commit the backend submodule changes before relying on remote builds. PHP 8.2 still needs migration before its December 2026 end of support; Laravel 12 is the supported bridge to the planned Laravel 13 upgrade.
+
+Auth and websocket use digest-pinned Node 24.22.2 on Alpine 3.24 and run production as UID 1000. npm 12.2.1's bundled Undici is patched to 6.29.1. Their dependency locks contain the audited updates, including bcrypt 6 and websocket's ws 8.22 pin. Commit changes in both service repositories before remote builds.
+
+Auth signing-key bind mounts must be readable by UID 1000 or its configured group while keeping private keys restricted. Deployment audits and image scans do not validate key permissions or application behavior; check those mounts and login behavior separately before deploying.
+
+The deployment workflow runs `composer audit --locked --no-dev` for backend candidates and `npm audit --omit=dev --audit-level=high` for Node candidates. Every service candidate receives a final-image HIGH/CRITICAL scan. The backend Dockerfile still enforces the patched Brotli minimum and Composer platform requirements during builds. Backend tests remain available manually through the Dockerfile test target. No temporary application, database, or Redis containers are started by these deployment gates.
+
+The current Debian image still has additional HIGH/CRITICAL scan findings without available packaged fixes. The gate intentionally rejects that backend candidate; passing PHP2Shell/Brotli checks and application tests does not override the image scan. Do not weaken the threshold or restore unsupported runtimes to make deployment pass. Review the retained report and vendor fixes before release. Development does not require backups or retention of previous images for this upgrade.
 
 ## Which services deploy
 

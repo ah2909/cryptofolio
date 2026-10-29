@@ -32,6 +32,8 @@
 **/secrets.dev.yaml
 **/values.dev.yaml
 **/tests/
+!src/backend/tests/
+!src/backend/tests/**
 **/docs/
 **/*.md
 LICENSE

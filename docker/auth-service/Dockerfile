@@ -1,22 +1,29 @@
-# Same structure as websocket service
-FROM node:23-alpine3.20 AS base
-
+FROM node:24.22.2-alpine3.24@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS base
+# npm 12.2.1 still bundles an affected Undici release.
+RUN npm install --global npm@12.2.1 \
+    && npm install --prefix /tmp/npm-security --no-package-lock --ignore-scripts --no-audit --no-fund undici@6.29.1 \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/undici \
+    && cp -a /tmp/npm-security/node_modules/undici /usr/local/lib/node_modules/npm/node_modules/undici \
+    && rm -rf /tmp/npm-security \
+    && npm cache clean --force
 WORKDIR /usr/src/app
 COPY ./src/auth-service/package*.json ./
 
-# Development stage
+FROM base AS dependencies
+RUN apk add --no-cache python3 make g++
+RUN npm ci --omit=dev && npm cache clean --force
+
 FROM base AS development
 RUN apk add --no-cache python3 make g++
 RUN npm ci
 COPY ./src/auth-service/ .
 EXPOSE 8086
-
 CMD ["npm", "run", "dev"]
 
-# Production stage
 FROM base AS production
-RUN npm ci --omit=dev && npm cache clean --force
+ENV NODE_ENV=production
+COPY --from=dependencies /usr/src/app/node_modules ./node_modules
 COPY ./src/auth-service/ .
+USER node
 EXPOSE 8086
-
-CMD ["npm", "start"]
+CMD ["node", "src/server.js"]
